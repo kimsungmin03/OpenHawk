@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+server/node_modules/
+client/node_modules/
+
+# Outputs & Uploads (임시 생성 파일)
+engine/outputs/*
+!engine/outputs/.gitkeep
+server/uploads/*
+!server/uploads/.gitkeep
+dataset/hard-negatives/*
+!dataset/hard-negatives/.gitkeep
+
+# Local Data
+server/data/history.json
+
+# Environment Variables
+.env
+
+# OS & IDE
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
