@@ -43,8 +43,9 @@ class CommentaryEngine:
 
     def analyze_and_comment(
         self,
-        snapshot_path: str,
+        snapshot_path: Optional[str],
         physical_result: Dict[str, Any],
+        verification_frame: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
         스냅샷 이미지와 1차 물리 판정 결과를 바탕으로
@@ -53,44 +54,46 @@ class CommentaryEngine:
         Args:
             snapshot_path: 호크아이 스냅샷 이미지 파일 경로
             physical_result: 1차 물리 판정 결과 (decision, distance_cm, status_detail 등)
+            verification_frame: 배지가 제거된 2차 검증용 BGR numpy 배열 (선택)
 
         Returns:
-            dict: {
-                "final_decision": "IN" | "OUT",
-                "match_status": "CONFIRMED" | "OVERRULED",
-                "vlm_decision": "IN" | "OUT",
-                "vlm_confidence": float,
-                "one_line_summary": str,
-                "commentary": str,
-                "engine_type": "GEMINI_VLM" | "LOCAL_RULE_BASED"
-            }
+            dict: 2차 시각 검증 및 해설 결과
         """
         decision_1st = physical_result.get("decision", "UNCERTAIN")
         dist_cm = physical_result.get("distance_cm", 0.0)
         status_detail = physical_result.get("status_detail", "")
-        contact_pt = physical_result.get("contact_point", (0, 0))
+        contact_pt = physical_result.get(
+            "contact_point",
+            (physical_result.get("contact_x", 0.0), physical_result.get("contact_y", 0.0)),
+        )
 
-        # API 클라이언트가 준비되어 있고 파일이 존재하는 경우 실제 VLM 호출
-        if self.client and os.path.exists(snapshot_path):
+        # API 클라이언트가 준비되어 있는 경우 실제 VLM 호출
+        if self.client and (verification_frame is not None or (snapshot_path and os.path.exists(snapshot_path))):
             try:
                 from PIL import Image
-                img = Image.open(snapshot_path)
+                import cv2
+
+                if verification_frame is not None:
+                    rgb = cv2.cvtColor(verification_frame, cv2.COLOR_BGR2RGB)
+                    img = Image.fromarray(rgb)
+                else:
+                    img = Image.open(snapshot_path)
 
                 prompt = f"""
 당신은 배드민턴 국제심판이자 재치 있는 공식 경기 해설위원 '스마트 선심'입니다.
-제공된 이미지는 비전 추론 엔진이 포착한 셔틀콕 착지 순간의 호크아이 스냅샷입니다.
-우측 상단에는 착지 지점이 2.5배 확대된 돋보기 인셋(IMPACT ZOOM)이 위치하며, 빨간색 가로선은 베이스라인 외곽 경계선(Outer Baseline)입니다.
+제공된 이미지는 비전 추론 엔진이 포착한 셔틀콕 착지 순간의 검증 스냅샷입니다.
+우측 상단에는 착지 지점이 2.5배 확대된 돋보기 인셋(IMPACT ZOOM)이 위치하며, 빨간색 실선은 베이스라인 외곽 경계선(Outer Baseline)입니다.
 
 [1차 비전 물리 데이터]
-- 1차 물리 판정: {decision_1st} ({status_detail})
-- 라인 외곽선과의 오차 거리: {dist_cm} cm
+- 1차 물리 판정 참고치: {decision_1st} ({status_detail})
+- 라인 외곽선과의 추정 거리: {dist_cm} cm
 - 착지 접촉 좌표: {contact_pt}
 
 [판정 규정]
-배드민턴 규정상 셔틀콕의 코르크나 깃털이 베이스라인 외곽선에 1mm라도 닿거나 걸치면 무조건 IN이며, 완전히 벗어났을 때만 OUT입니다.
+배드민턴 규정상 셔틀콕의 코르크가 베이스라인 외곽선(빨간 실선, 화면 위쪽이 코트 안쪽, 아래쪽이 코트 바깥쪽)에 1mm라도 닿거나 걸치면 무조건 IN이며, 빨간 외곽선 아래쪽(바깥쪽)으로 완전히 벗어났을 때만 OUT입니다.
 
 [요청 사항]
-1. 돋보기 뷰의 십자선과 빨간 베이스라인 외곽선을 면밀히 관찰하여 시각적 In/Out을 2차 검증하십시오.
+1. 텍스트에 의존하지 말고 돋보기 뷰(IMPACT ZOOM)의 십자선 중심과 빨간 베이스라인 외곽선을 독립적으로 관찰하여 시각적 In/Out을 2차 검증하십시오.
 2. 1차 물리 판정과 일치하는지(CONFIRMED) 번복이 필요한지(OVERRULED) 결정하십시오.
 3. 코트 위의 동호인들이 한눈에 직관적으로 이해할 수 있는 명쾌한 [한 줄 요약]을 작성하십시오.
 4. 랠리의 긴장감과 착지 위치의 아슬아슬함을 생생하게 전하는 2~3문장의 [전문 해설 멘트]를 위트 있게 작성하십시오.

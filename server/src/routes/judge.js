@@ -64,10 +64,39 @@ router.post('/upload', upload.single('video'), async (req, res) => {
     // 1. Python 추론 엔진 실행
     const engineResult = await engineRunner.runAnalysis(videoPath, roiCoords);
 
+    if (engineResult.status === 'FAIL') {
+      const recordId = uuidv4();
+      const failRecord = historyStore.saveRecord({
+        id: recordId,
+        status: 'FAIL',
+        video_filename: req.file.filename,
+        physical_decision: 'UNCERTAIN',
+        final_decision: 'UNCERTAIN',
+        match_status: 'UNCERTAIN',
+        distance_cm: 0.0,
+        confidence: 0.0,
+        impact_frame_idx: 0,
+        timestamp_ms: 0.0,
+        contact_point: [0, 0],
+        snapshot_url: null,
+        commentary: {
+          one_line_summary: engineResult.message || '영상에서 셔틀콕 착지 지점을 판별하지 못했습니다.',
+          detailed: '카메라 흔들림이나 조명 반사로 인해 셔틀콕 궤적을 충분히 확보하지 못했습니다. 베이스라인이 선명하게 보이도록 다시 촬영해 주세요.',
+          engine_type: 'VISION_GUARD',
+        },
+      });
+      return res.status(200).json({
+        success: true,
+        data: failRecord,
+        raw_engine_result: engineResult,
+      });
+    }
+
     // 2. 이력 저장
     const recordId = uuidv4();
     const record = historyStore.saveRecord({
       id: recordId,
+      status: 'SUCCESS',
       video_filename: req.file.filename,
       physical_decision: engineResult.physical_decision,
       final_decision: engineResult.final_decision,
@@ -75,6 +104,7 @@ router.post('/upload', upload.single('video'), async (req, res) => {
       distance_cm: engineResult.distance_cm,
       confidence: engineResult.confidence,
       impact_frame_idx: engineResult.impact_frame_idx,
+      timestamp_ms: engineResult.timestamp_ms,
       contact_point: engineResult.contact_point,
       snapshot_url: engineResult.snapshot_url,
       commentary: engineResult.commentary,
@@ -113,15 +143,17 @@ router.post('/test-sample', async (req, res) => {
     const recordId = uuidv4();
     const record = historyStore.saveRecord({
       id: recordId,
+      status: engineResult.status || 'SUCCESS',
       video_filename: sampleType,
-      physical_decision: engineResult.physical_decision,
-      final_decision: engineResult.final_decision,
-      match_status: engineResult.match_status,
-      distance_cm: engineResult.distance_cm,
-      confidence: engineResult.confidence,
-      impact_frame_idx: engineResult.impact_frame_idx,
-      contact_point: engineResult.contact_point,
-      snapshot_url: engineResult.snapshot_url,
+      physical_decision: engineResult.physical_decision || 'UNCERTAIN',
+      final_decision: engineResult.final_decision || 'UNCERTAIN',
+      match_status: engineResult.match_status || 'CONFIRMED',
+      distance_cm: engineResult.distance_cm ?? 0.0,
+      confidence: engineResult.confidence ?? 0.0,
+      impact_frame_idx: engineResult.impact_frame_idx ?? 0,
+      timestamp_ms: engineResult.timestamp_ms ?? 0.0,
+      contact_point: engineResult.contact_point || [0, 0],
+      snapshot_url: engineResult.snapshot_url || null,
       commentary: engineResult.commentary,
     });
 

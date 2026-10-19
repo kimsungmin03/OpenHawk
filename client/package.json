@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "AI Hawk-Eye Lite Mobile Web Client",
   "scripts": {
+    "start": "vite",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview"

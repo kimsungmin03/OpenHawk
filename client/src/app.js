@@ -100,34 +100,57 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  function escapeHtml(str) {
+    return String(str ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
   // 3. 판정 결과 렌더링
   function renderResult(data) {
     currentRecordId = data.id;
-    const isIN = data.final_decision === 'IN';
+    const decision = data.final_decision || 'UNCERTAIN';
+    const isIN = decision === 'IN';
+    const isUncertain = decision === 'UNCERTAIN' || data.status === 'FAIL';
 
     // 뱃지 스타일 업데이트
-    if (isIN) {
+    if (isUncertain) {
+      verdictBanner.className = 'p-5 flex items-center justify-between text-white bg-amber-600';
+      verdictText.textContent = '판독 불가';
+      marginText.textContent = '- cm';
+    } else if (isIN) {
       verdictBanner.className = 'p-5 flex items-center justify-between text-white bg-emerald-600 neon-in';
       verdictText.textContent = 'IN';
       marginText.textContent = '0.0 cm';
     } else {
       verdictBanner.className = 'p-5 flex items-center justify-between text-white bg-rose-600 neon-out';
       verdictText.textContent = 'OUT';
-      marginText.textContent = `+${data.distance_cm} cm`;
+      marginText.textContent = `+${data.distance_cm ?? 0} cm`;
     }
 
     matchStatusBadge.textContent = data.match_status || 'CONFIRMED';
-    impactInfoText.textContent = `Frame #${data.impact_frame_idx} (${Math.round(data.timestamp_ms || 0)}ms)`;
+    impactInfoText.textContent = `Frame #${data.impact_frame_idx ?? 0} (${Math.round(data.timestamp_ms || 0)}ms)`;
 
     // 스냅샷 이미지
+    const snapshotWrapper = snapshotImg.parentElement;
     if (data.snapshot_url) {
+      snapshotWrapper.classList.remove('hidden');
       snapshotImg.src = data.snapshot_url;
       snapshotImg.onclick = () => openImageModal(data.snapshot_url);
+    } else {
+      snapshotWrapper.classList.add('hidden');
+      snapshotImg.removeAttribute('src');
+      snapshotImg.onclick = null;
     }
 
     // AI 해설 정보
     const comm = data.commentary || {};
-    summaryText.textContent = comm.one_line_summary || (isIN ? '베이스라인 인 판정입니다.' : '베이스라인 아웃 판정입니다.');
+    summaryText.textContent =
+      comm.one_line_summary ||
+      (isUncertain ? '셔틀콕 착지 지점을 특정하지 못했습니다.' : isIN ? '베이스라인 인 판정입니다.' : '베이스라인 아웃 판정입니다.');
     commentaryText.textContent = comm.detailed || 'AI 해설이 제공되지 않았습니다.';
     engineTypeTag.textContent = comm.engine_type || 'LOCAL AI';
 
@@ -203,8 +226,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
       historyList.innerHTML = items
         .map((item) => {
-          const isIN = item.final_decision === 'IN';
-          const badgeClass = isIN ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' : 'bg-rose-500/20 text-rose-400 border-rose-500/30';
+          const decision = item.final_decision || 'UNCERTAIN';
+          const isIN = decision === 'IN';
+          const isUncertain = decision === 'UNCERTAIN';
+          const badgeClass = isUncertain
+            ? 'bg-amber-500/20 text-amber-400 border-amber-500/30'
+            : isIN
+              ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
+              : 'bg-rose-500/20 text-rose-400 border-rose-500/30';
           const timeStr = new Date(item.created_at).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
           const feedbackBadge = item.feedback
@@ -213,15 +242,20 @@ document.addEventListener('DOMContentLoaded', () => {
               : '<span class="text-[10px] text-rose-400">👎 불복(리뷰대기)</span>'
             : '';
 
+          const safeId = escapeHtml(item.id);
+          const safeDecision = escapeHtml(decision);
+          const safeSummary = escapeHtml(item.commentary?.one_line_summary || item.video_filename);
+          const safeDist = escapeHtml(item.distance_cm ?? 0);
+
           return `
-            <div class="flex items-center justify-between p-2.5 rounded-xl bg-slate-950/60 border border-slate-800 hover:border-slate-700 cursor-pointer transition active:scale-[0.99]" onclick="window.viewHistoryDetail('${item.id}')">
+            <div class="flex items-center justify-between p-2.5 rounded-xl bg-slate-950/60 border border-slate-800 hover:border-slate-700 cursor-pointer transition active:scale-[0.99]" onclick="window.viewHistoryDetail('${safeId}')">
               <div class="flex items-center gap-2.5">
                 <span class="text-xs font-black px-2 py-0.5 rounded border ${badgeClass}">
-                  ${item.final_decision}
+                  ${safeDecision}
                 </span>
                 <div>
-                  <p class="text-xs font-medium text-slate-200 truncate max-w-[170px]">${item.commentary?.one_line_summary || item.video_filename}</p>
-                  <p class="text-[10px] text-slate-500">${timeStr} · 오차 ${item.distance_cm}cm</p>
+                  <p class="text-xs font-medium text-slate-200 truncate max-w-[170px]">${safeSummary}</p>
+                  <p class="text-[10px] text-slate-500">${escapeHtml(timeStr)} · 오차 ${safeDist}cm</p>
                 </div>
               </div>
               <div>${feedbackBadge}</div>

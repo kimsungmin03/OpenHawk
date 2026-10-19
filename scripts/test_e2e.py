@@ -87,13 +87,13 @@ def run_e2e_test():
         sys.exit(1)
 
     # 2. 비디오 업로드 및 AI 판정
-    log_step(2, "비디오 클립 업로드 및 초고속 AI 판정 파이프라인")
+    log_step(2, "비디오 클립 업로드 및 초고속 AI 판정 파이프라인 (상주형 워커)")
     test_video = "engine/assets/videos/sample_out.mp4"
     if not os.path.exists(test_video):
         print(f"[ERROR] 테스트 비디오 파일이 없습니다: {test_video}")
         sys.exit(1)
 
-    print(f" -> 비디오 업로드 전송: {test_video} ({os.path.getsize(test_video)} bytes)")
+    print(f" -> [1차 요청] 비디오 업로드 전송: {test_video} ({os.path.getsize(test_video)} bytes)")
     start_t = time.time()
     upload_res = http_post_multipart(f"{SERVER_URL}/api/judge/upload", test_video)
     elapsed = round(time.time() - start_t, 2)
@@ -102,12 +102,23 @@ def run_e2e_test():
     record = upload_res["data"]
     record_id = record["id"]
 
-    print(f" -> 판독 완료! (소요 시간: {elapsed}초)")
+    print(f" -> [1차 판독 완료] 소요 시간: {elapsed}초")
     print(f" -> 최종 판정     : {record['final_decision']} ({record['match_status']})")
     print(f" -> 경계 오차     : {record['distance_cm']} cm")
     print(f" -> 신뢰도        : {int(record['confidence'] * 100)}%")
-    print(f" -> 착지 프레임   : #{record['impact_frame_idx']}")
+    print(f" -> 착지 프레임   : #{record['impact_frame_idx']} ({record.get('timestamp_ms')} ms)")
     print(f" -> 호크아이 스냅샷: {record['snapshot_url']}")
+    assert record["final_decision"] == "OUT", f"OUT 샘플 판정 오류: {record['final_decision']}"
+    assert record.get("timestamp_ms", 0) > 0, "timestamp_ms 필드가 누락되었습니다."
+
+    # 2-2. 상주형 워커 Warm 상태 연속 요청 속도 및 IN 샘플 검증
+    start_warm = time.time()
+    in_res = http_post_json(f"{SERVER_URL}/api/judge/test-sample", {"sampleType": "in"})
+    warm_elapsed = round(time.time() - start_warm, 2)
+    assert in_res.get("success") is True, f"IN 샘플 테스트 실패: {in_res}"
+    in_record = in_res["data"]
+    print(f" -> [2차 Warm 워커 판독] sample_in.mp4 판정: {in_record['final_decision']} (소요 시간: {warm_elapsed}초)")
+    assert in_record["final_decision"] == "IN", f"IN 샘플 판정 오류: {in_record['final_decision']}"
 
     # 3. AI 해설 브리핑 확인
     log_step(3, "생성형 AI 해설 브리핑 검증")

@@ -29,6 +29,31 @@ from core.visualizer import HawkEyeVisualizer
 from core.commentary import CommentaryEngine
 
 
+def _read_frame_at(video_path: str, target_idx: int, fallback_frame: Optional[Any] = None) -> Optional[Any]:
+    """전체 프레임을 메모리에 적재하지 않고 특정 인덱스의 프레임 1장만 정밀 추출합니다."""
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return fallback_frame
+    try:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, target_idx))
+        ret, frame = cap.read()
+        if ret and frame is not None:
+            return frame
+        # 코덱에 따라 seek가 부정확할 경우 순차 스킵으로 폴백
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        curr = 0
+        last_valid = fallback_frame
+        while curr <= target_idx:
+            ret, f = cap.read()
+            if not ret:
+                break
+            last_valid = f
+            curr += 1
+        return last_valid
+    finally:
+        cap.release()
+
+
 def analyze_clip(
     video_path: str,
     roi_coords: Optional[str] = None,
@@ -37,6 +62,8 @@ def analyze_clip(
     enable_ai: bool = True,
     tracker_type: str = "auto",
     model_path: Optional[str] = None,
+    tracker: Optional[ShuttlecockTracker] = None,
+    commentary_engine: Optional[CommentaryEngine] = None,
 ) -> Dict[str, Any]:
     """
     비디오 클립을 분석하여 셔틀콕 착지 프레임 검출, In/Out 판정 및 AI 해설 생성 수행
@@ -47,6 +74,8 @@ def analyze_clip(
         output_dir: 스냅샷 저장 디렉토리
         save_snapshot: 결과 스냅샷 이미지 생성 여부
         enable_ai: 생성형 AI 2차 검증 및 해설 모듈 구동 여부
+        tracker: 상주 워커에서 재사용할 ShuttlecockTracker 인스턴스 (선택)
+        commentary_engine: 상주 워커에서 재사용할 CommentaryEngine 인스턴스 (선택)
 
     Returns:
         dict: 최종 판정 결과 데이터
@@ -58,8 +87,6 @@ def analyze_clip(
     if not cap.isOpened():
         raise RuntimeError(f"비디오 파일을 열 수 없습니다: {video_path}")
 
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
 
     # 1. 베이스라인 ROI 초기화
@@ -70,11 +97,15 @@ def analyze_clip(
             baseline._update_boundaries((parts[0], parts[1], parts[2], parts[3]))
             print(f"[ENGINE] 수동 지정 베이스라인 ROI 적용: {parts}")
 
-    tracker = ShuttlecockTracker(tracker_type=tracker_type, model_path=model_path)
-    frames_buffer = []
+    if tracker is not None:
+        tracker.reset()
+    else:
+        tracker = ShuttlecockTracker(tracker_type=tracker_type, model_path=model_path)
+
+    last_frame = None
     frame_idx = 0
 
-    # 2. 비디오 프레임 순회 및 셔틀콕 추적
+    # 2. 비디오 프레임 순회 및 셔틀콕 추적 (RAM 절약을 위해 전체 프레임 버퍼 미사용)
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -86,13 +117,16 @@ def analyze_clip(
         if baseline.line_rect is None and frame_idx == 0:
             success = baseline.auto_detect_baseline(frame)
             if success:
-                print(f"[ENGINE] 베이스라인 자동 검출 성공: outer_y={baseline.outer_y}, line_h={baseline.pixel_height}px")
+                print(
+                    f"[ENGINE] 베이스라인 자동 검출 성공: outer_y={baseline.outer_y}, "
+                    f"line_h={baseline.pixel_height}px, slope={baseline.slope:.4f}"
+                )
             else:
                 print("[ENGINE] 베이스라인 자동 검출 실패. 기본 하단 영역을 적용합니다.")
 
         # 셔틀콕 탐색
         tracker.process_frame(frame, frame_idx=frame_idx, timestamp_ms=timestamp_ms)
-        frames_buffer.append(frame)
+        last_frame = frame
         frame_idx += 1
 
     cap.release()
@@ -102,6 +136,8 @@ def analyze_clip(
             "status": "FAIL",
             "message": "영상에서 셔틀콕의 이동 궤적을 감지하지 못했습니다.",
             "decision": "UNCERTAIN",
+            "physical_decision": "UNCERTAIN",
+            "final_decision": "UNCERTAIN",
         }
 
     # 3. 착지 순간(Impact Frame) 분석
@@ -113,30 +149,31 @@ def analyze_clip(
             "status": "FAIL",
             "message": "착지 순간을 명확히 특정할 수 없습니다.",
             "decision": "UNCERTAIN",
+            "physical_decision": "UNCERTAIN",
+            "final_decision": "UNCERTAIN",
         }
 
     impact_idx = impact["impact_frame_idx"]
-    impact_frame = frames_buffer[min(impact_idx, len(frames_buffer) - 1)]
+    impact_frame = _read_frame_at(video_path, impact_idx, fallback_frame=last_frame)
 
-    # 4. 호크아이 판정 스냅샷 생성
-    snapshot_path = None
-    if save_snapshot:
-        snapshot_path = HawkEyeVisualizer.create_judgment_snapshot(
+    verdict = dict(impact["baseline_verdict"])
+    verdict["confidence"] = impact["confidence"]
+
+    # 4. 생성형 AI (VLM & LLM) 2차 검증 및 해설 브리핑 생성
+    #    텍스트 배지에 의한 확증 편향을 없애기 위해 배지 없는 검증 캔버스를 먼저 전달
+    commentary_info = None
+    if enable_ai and impact_frame is not None:
+        verification_canvas = HawkEyeVisualizer.render_canvas(
             impact_frame=impact_frame,
             impact_result=impact,
             trajectory=tracker.trajectory,
-            output_dir=output_dir,
+            draw_badge=False,
         )
-
-    verdict = impact["baseline_verdict"]
-
-    # 5. 생성형 AI (VLM & LLM) 2차 검증 및 해설 브리핑 생성
-    commentary_info = None
-    if enable_ai and snapshot_path:
-        engine = CommentaryEngine()
+        engine = commentary_engine or CommentaryEngine()
         commentary_info = engine.analyze_and_comment(
-            snapshot_path=snapshot_path,
+            snapshot_path=None,
             physical_result=verdict,
+            verification_frame=verification_canvas,
         )
 
     final_decision = (
@@ -149,6 +186,20 @@ def analyze_clip(
         if commentary_info
         else "CONFIRMED"
     )
+
+    # 5. 호크아이 판정 스냅샷 생성 (VLM 번복 시 최종 판정에 맞춰 배지 표시)
+    snapshot_path = None
+    if save_snapshot and impact_frame is not None:
+        snapshot_impact = dict(impact)
+        snapshot_verdict = dict(verdict)
+        snapshot_verdict["decision"] = final_decision
+        snapshot_impact["baseline_verdict"] = snapshot_verdict
+        snapshot_path = HawkEyeVisualizer.create_judgment_snapshot(
+            impact_frame=impact_frame,
+            impact_result=snapshot_impact,
+            trajectory=tracker.trajectory,
+            output_dir=output_dir,
+        )
 
     result = {
         "status": "SUCCESS",
@@ -168,12 +219,13 @@ def analyze_clip(
             "one_line_summary": commentary_info.get("one_line_summary", "") if commentary_info else "",
             "detailed": commentary_info.get("commentary", "") if commentary_info else "",
             "vlm_decision": commentary_info.get("vlm_decision", verdict["decision"]) if commentary_info else verdict["decision"],
-            "vlm_confidence": commentary_info.get("vlm_confidence", 0.9) if commentary_info else 0.9,
+            "vlm_confidence": commentary_info.get("vlm_confidence", impact["confidence"]) if commentary_info else impact["confidence"],
             "engine_type": commentary_info.get("engine_type", "NONE") if commentary_info else "NONE",
         },
         "baseline_info": {
             "outer_boundary_y": verdict["outer_boundary_y"],
             "inner_boundary_y": verdict["inner_boundary_y"],
+            "slope": verdict.get("slope", 0.0),
             "cm_per_pixel": verdict["cm_per_pixel"],
         },
     }

@@ -55,64 +55,76 @@ class ImpactDetector:
         if len(trajectory) < min_trajectory_len:
             return None
 
-        # y좌표 시계열 배열
+        # 시계열 좌표 및 프레임 인덱스 배열
         y_vals = np.array([pt["center"][1] for pt in trajectory], dtype=float)
         x_vals = np.array([pt["center"][0] for pt in trajectory], dtype=float)
+        f_idxs = np.array([pt["frame_idx"] for pt in trajectory], dtype=float)
 
-        # 1차 차분 (수직 속도 근사)
-        dy = np.diff(y_vals)
+        # 프레임 간격(dt)으로 정규화한 1차 차분 (수직 속도 vy: px/frame)
+        dt = np.maximum(1.0, np.diff(f_idxs))
+        vy = np.diff(y_vals) / dt
 
-        # 로컬 극대점(착지 후보) 탐색: 수직 낙하 속도(dy) 급감/반전 지점
+        # 로컬 극대점(착지 후보) 탐색: 수직 낙하 속도(vy) 급감/반전 지점
         candidates = []
         for i in range(1, len(y_vals) - 1):
-            prev_dy = dy[i - 1]
-            curr_dy = dy[i]
+            prev_vy = vy[i - 1]
+            curr_vy = vy[i]
 
-            # 하강(prev_dy > 0)하다가 바닥 충돌로 정지 또는 반전(curr_dy <= 0)하는 감속 피크
-            deceleration = prev_dy - curr_dy
-            is_peak = (y_vals[i] >= y_vals[i - 1]) and (y_vals[i] >= y_vals[i + 1])
-            is_impact_decel = (prev_dy > 1.5) and (curr_dy <= 1.0)
+            # 하강(prev_vy > 0)하다가 바닥 충돌로 급감속(deceleration >= 3.0) 또는 반전하는 지점
+            deceleration = prev_vy - curr_vy
+            is_peak = (y_vals[i] >= y_vals[i - 1]) and (y_vals[i] >= y_vals[i + 1]) and (prev_vy > 0)
+            is_impact_decel = (prev_vy > 1.5) and (curr_vy <= 1.5) and (deceleration >= 2.5)
 
             if is_peak or is_impact_decel:
                 pt_info = trajectory[i]
-                contact_y = pt_info["center"][1]
-                contact_x = pt_info["center"][0]
+                contact_x = float(pt_info["center"][0])
+                contact_y = float(pt_info["center"][1])
 
-                # 베이스라인과의 근접성 평가
-                outer_y = self.baseline_roi.outer_y or 0
-                dist_to_baseline = abs(contact_y - outer_y)
+                # 기울기가 반영된 해당 x좌표의 베이스라인 외곽선 y좌표
+                local_outer_y = max(1.0, self.baseline_roi.get_outer_y_at(contact_x))
+                dist_to_baseline_norm = abs(contact_y - local_outer_y) / local_outer_y
+                y_norm = contact_y / local_outer_y
 
-                # 점수 계산: 낙하 감속 충격량(deceleration) + 바닥 근접성 + 첫 충돌 우선 가중치
-                # 착지 후 굴러가는 현상을 배제하기 위해 최초 낙하 충돌 지점에 가중치 부여
-                score = (deceleration * 10.0) + y_vals[i] - (dist_to_baseline * 0.5)
+                # 해상도 독립적 점수 계산:
+                # 1) 감속 충격량(deceleration)
+                # 2) 베이스라인 근접성 및 하단 도달 비율(y_norm)
+                # 3) 착지 후 미끄러짐(sliding) 프레임보다 '최초 충돌 프레임'을 우선시하는 시간 가중치
+                order_penalty = (i / float(len(y_vals))) * 2.5
+                score = (deceleration * 3.5) + (y_norm * 10.0) - (dist_to_baseline_norm * 8.0) - order_penalty
 
                 candidates.append({
                     "index": i,
                     "score": score,
-                    "deceleration": deceleration,
+                    "deceleration": float(max(0.0, deceleration)),
                     "pt_info": pt_info,
                 })
 
         if not candidates:
-            # 뚜렷한 극대점이 없는 경우 전체 궤적 중 y값이 가장 큰 지점 선택
+            # 뚜렷한 극대점이 없는 경우 전체 궤적 중 y값이 가장 큰 최초 지점 선택
             best_idx = int(np.argmax(y_vals))
             best_candidate = trajectory[best_idx]
+            best_decel = 1.0
         else:
             best_match = max(candidates, key=lambda c: c["score"])
             best_candidate = best_match["pt_info"]
+            best_decel = best_match["deceleration"]
 
-        # 착지 접촉점 계산 (셔틀콕 코르크 부분: 바운딩 박스의 최하단 중앙)
-        bx, by, bw, bh = best_candidate["bbox"]
-        contact_x = float(bx + bw / 2.0)
-        contact_y = float(by + bh)  # 코르크 하단부
+        # 착지 접촉점 계산:
+        # 셔틀콕 중심(cx, cy)을 기준 접촉점으로 전달하고, 코르크 반경 보정은 BaselineROI.judge_point에서 수행
+        cx, cy = best_candidate["center"]
+        contact_x = float(cx)
+        contact_y = float(cy)
 
         # 베이스라인 물리 판정 수행
         verdict = self.baseline_roi.judge_point(contact_x, contact_y)
 
-        # 판정 신뢰도 계산 (궤적의 완성도 및 베이스라인과의 명확한 거리 기반)
-        confidence = 0.92 if len(trajectory) >= 10 else 0.78
-        if verdict["status_detail"] == "ON_LINE":
-            confidence = 0.95  # 라인 위 확실한 접촉
+        # 동적 판정 신뢰도 계산 (궤적 밀도 + 감속 명확도 + 검출기 신뢰도 결합)
+        traj_score = min(1.0, len(trajectory) / 25.0)
+        decel_score = min(1.0, best_decel / 6.0)
+        raw_det_conf = float(best_candidate.get("confidence", 0.88))
+        det_conf = max(0.82, raw_det_conf) if traj_score >= 0.8 else raw_det_conf
+        raw_conf = 0.45 * det_conf + 0.30 * traj_score + 0.25 * decel_score
+        confidence = round(float(np.clip(raw_conf, 0.70, 0.99)), 2)
 
         return {
             "impact_frame_idx": best_candidate["frame_idx"],

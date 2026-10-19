@@ -62,7 +62,7 @@ def test_landing_algorithm(
 
     baseline = BaselineROI()
     tracker = ShuttlecockTracker(tracker_type=tracker_type)
-    frames_buffer = []
+    last_frame = None
     frame_idx = 0
 
     # 1. 프레임 순회 및 궤적 기록
@@ -77,12 +77,15 @@ def test_landing_algorithm(
         if baseline.line_rect is None and frame_idx == 0:
             success = baseline.auto_detect_baseline(frame)
             if success:
-                print(f" [검출] 베이스라인 외곽 경계 y={baseline.outer_y}px, 내곽 y={baseline.inner_y}px (1px당 {baseline.cm_per_pixel:.3f}cm)")
+                print(
+                    f" [검출] 베이스라인 외곽 경계 y={baseline.outer_y}px, 내곽 y={baseline.inner_y}px "
+                    f"(1px당 {baseline.cm_per_pixel:.3f}cm, 기울기={baseline.slope:.4f})"
+                )
             else:
                 print(" [주의] 베이스라인 자동 검출 실패 -> 화면 하단 기본 영역 적용")
 
         tracker.process_frame(frame, frame_idx=frame_idx, timestamp_ms=timestamp_ms)
-        frames_buffer.append(frame)
+        last_frame = frame
         frame_idx += 1
 
     cap.release()
@@ -145,7 +148,8 @@ def test_landing_algorithm(
     print("=" * 70)
 
     # 4. 판정 스냅샷 이미지 저장
-    impact_frame = frames_buffer[min(impact_frame_idx, len(frames_buffer) - 1)]
+    from main import _read_frame_at
+    impact_frame = _read_frame_at(video_path, impact_frame_idx, fallback_frame=last_frame)
     snapshot_path = HawkEyeVisualizer.create_judgment_snapshot(
         impact_frame=impact_frame,
         impact_result=impact,

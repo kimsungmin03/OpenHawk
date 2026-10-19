@@ -65,6 +65,15 @@
       document.getElementById('btn-refresh').addEventListener('click', loadDisputedCases);
     });
 
+    function escapeHtml(str) {
+      return String(str ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
     async function loadDisputedCases() {
       const container = document.getElementById('cases-container');
       const statCount = document.getElementById('stat-count');
@@ -91,24 +100,34 @@
         container.innerHTML = items.map((item) => {
           const fb = item.feedback || {};
           const timeStr = new Date(item.created_at).toLocaleString('ko-KR');
+          const safeId = escapeHtml(item.id || '');
+          const safeShortId = escapeHtml((item.id || '').slice(0, 8));
+          const safeDecision = escapeHtml(item.final_decision || 'UNCERTAIN');
+          const safeDist = escapeHtml(item.distance_cm ?? 0);
+          const safeUserDecision = escapeHtml(fb.user_decision || '미지정');
+          const safeComment = escapeHtml(fb.comment || '별도 사유 미작성');
+          const safeSnapshotUrl = escapeHtml(item.snapshot_url || '');
+          const safeVideoName = escapeHtml(item.video_filename || '');
+          const safeFrameIdx = escapeHtml(item.impact_frame_idx ?? 0);
+          const safeConf = escapeHtml(Math.round((item.confidence || 0) * 100));
 
           return `
             <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5 hover:border-slate-700 transition space-y-4">
               <div class="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3">
                 <div class="flex items-center gap-2">
                   <span class="text-xs font-mono font-bold px-2 py-0.5 rounded bg-slate-800 text-slate-300">
-                    ID: ${item.id.slice(0, 8)}
+                    ID: ${safeShortId}
                   </span>
-                  <span class="text-xs text-slate-400">${timeStr}</span>
+                  <span class="text-xs text-slate-400">${escapeHtml(timeStr)}</span>
                 </div>
                 <div class="flex items-center gap-2">
                   <span class="text-xs font-semibold text-slate-400">시스템 판정:</span>
                   <span class="text-xs font-black px-2 py-0.5 rounded ${item.final_decision === 'IN' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'}">
-                    ${item.final_decision} (오차 ${item.distance_cm}cm)
+                    ${safeDecision} (오차 ${safeDist}cm)
                   </span>
                   <span class="text-xs font-semibold text-slate-400">➡️ 사용자 의견:</span>
                   <span class="text-xs font-black px-2 py-0.5 rounded bg-amber-500/20 text-amber-400 border border-amber-500/30">
-                    ${fb.user_decision || '미지정'}
+                    ${safeUserDecision}
                   </span>
                 </div>
               </div>
@@ -116,7 +135,7 @@
               <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <!-- 스냅샷 이미지 -->
                 <div class="bg-black rounded-xl overflow-hidden aspect-video flex items-center justify-center border border-slate-800">
-                  <img src="${item.snapshot_url}" alt="스냅샷" class="w-full h-full object-contain" />
+                  <img src="${safeSnapshotUrl}" alt="스냅샷" class="w-full h-full object-contain" />
                 </div>
 
                 <!-- 상세 코멘트 & 아카이브 경로 -->
@@ -124,23 +143,23 @@
                   <div>
                     <span class="font-bold text-slate-400 block mb-0.5">💬 동호인 사용자 불복 사유:</span>
                     <p class="p-2.5 rounded-lg bg-slate-950/80 border border-slate-800 text-slate-200">
-                      "${fb.comment || '별도 사유 미작성'}"
+                      "${safeComment}"
                     </p>
                   </div>
 
                   <div>
                     <span class="font-bold text-slate-400 block mb-0.5">📁 격리 보관 경로:</span>
                     <p class="font-mono text-[11px] text-cyan-400 truncate bg-slate-950 p-2 rounded border border-slate-800">
-                      dataset/hard-negatives/${item.id}/
+                      dataset/hard-negatives/${safeId}/
                     </p>
                   </div>
 
                   <div class="flex items-center gap-2 pt-1 text-slate-500 text-[11px]">
-                    <span>비디오: ${item.video_filename}</span>
+                    <span>비디오: ${safeVideoName}</span>
                     <span>·</span>
-                    <span>착지 프레임: #${item.impact_frame_idx}</span>
+                    <span>착지 프레임: #${safeFrameIdx}</span>
                     <span>·</span>
-                    <span>신뢰도: ${Math.round(item.confidence * 100)}%</span>
+                    <span>신뢰도: ${safeConf}%</span>
                   </div>
                 </div>
               </div>
@@ -150,7 +169,7 @@
 
         lucide.createIcons();
       } catch (err) {
-        container.innerHTML = `<p class="text-rose-400 text-center py-4">데이터 로드 실패: ${err.message}</p>`;
+        container.innerHTML = `<p class="text-rose-400 text-center py-4">데이터 로드 실패: ${escapeHtml(err.message)}</p>`;
       }
     }
   </script>

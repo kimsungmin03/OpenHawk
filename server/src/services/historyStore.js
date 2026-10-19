@@ -1,7 +1,8 @@
 /**
  * historyStore.js
  * ---------------
- * 판정 이력 및 사용자 피드백을 JSON 파일 기반으로 영속 저장/조회하는 경량 저장소
+ * 판정 이력 및 사용자 피드백을 메모리 캐시 + 원자적(Atomic) JSON 파일 저장으로 관리하고,
+ * 오래된 임시 업로드/스냅샷 파일을 자동 정리(Retention Cleanup)하는 저장소
  */
 
 const fs = require('fs');
@@ -9,9 +10,11 @@ const path = require('path');
 
 const DATA_DIR = path.resolve(__dirname, '../../data');
 const DATA_FILE = path.join(DATA_DIR, 'history.json');
+const MAX_RETAINED_FILES = 100;
 
 class HistoryStore {
   constructor() {
+    this.cache = null;
     this._ensureFile();
   }
 
@@ -25,19 +28,28 @@ class HistoryStore {
   }
 
   _readAll() {
+    if (this.cache !== null) {
+      return this.cache;
+    }
     try {
       this._ensureFile();
       const content = fs.readFileSync(DATA_FILE, 'utf-8');
-      return JSON.parse(content) || [];
+      this.cache = JSON.parse(content) || [];
+      return this.cache;
     } catch (err) {
       console.error('[HistoryStore] 파일 읽기 실패:', err);
-      return [];
+      this.cache = [];
+      return this.cache;
     }
   }
 
   _writeAll(data) {
+    this.cache = data;
     try {
-      fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), 'utf-8');
+      this._ensureFile();
+      const tmpFile = `${DATA_FILE}.tmp`;
+      fs.writeFileSync(tmpFile, JSON.stringify(data, null, 2), 'utf-8');
+      fs.renameSync(tmpFile, DATA_FILE);
     } catch (err) {
       console.error('[HistoryStore] 파일 쓰기 실패:', err);
     }
@@ -48,21 +60,27 @@ class HistoryStore {
     const entry = {
       id: record.id,
       created_at: new Date().toISOString(),
+      status: record.status || 'SUCCESS',
       video_filename: record.video_filename,
-      physical_decision: record.physical_decision,
-      final_decision: record.final_decision,
-      match_status: record.match_status,
-      distance_cm: record.distance_cm,
-      confidence: record.confidence,
-      impact_frame_idx: record.impact_frame_idx,
-      contact_point: record.contact_point,
-      snapshot_url: record.snapshot_url,
-      commentary: record.commentary,
-      feedback: null, // 초기 피드백은 null
+      physical_decision: record.physical_decision || 'UNCERTAIN',
+      final_decision: record.final_decision || 'UNCERTAIN',
+      match_status: record.match_status || 'CONFIRMED',
+      distance_cm: record.distance_cm ?? 0.0,
+      confidence: record.confidence ?? 0.0,
+      impact_frame_idx: record.impact_frame_idx ?? 0,
+      timestamp_ms: record.timestamp_ms ?? 0.0,
+      contact_point: record.contact_point || [0, 0],
+      snapshot_url: record.snapshot_url || null,
+      commentary: record.commentary || null,
+      feedback: null,
     };
 
-    list.unshift(entry); // 최신순
+    list.unshift(entry);
     this._writeAll(list);
+
+    // 비동기로 오래된 임시 파일 정리
+    setImmediate(() => this._cleanupOldMediaFiles());
+
     return entry;
   }
 
@@ -84,9 +102,9 @@ class HistoryStore {
     }
 
     const feedbackObj = {
-      agreed: Boolean(feedbackData.agreed), // true: 판정인정, false: 판정불복
-      user_decision: feedbackData.user_decision || null, // 사용자가 생각한 실제 결과 (IN / OUT)
-      comment: feedbackData.comment || '',
+      agreed: Boolean(feedbackData.agreed),
+      user_decision: feedbackData.user_decision || null,
+      comment: String(feedbackData.comment || '').slice(0, 500),
       submitted_at: new Date().toISOString(),
     };
 
@@ -121,7 +139,6 @@ class HistoryStore {
 
       // 2. 비디오 클립 복사
       if (record.video_filename) {
-        // uploads 폴더 또는 assets/videos 폴더 탐색
         const uploadVideo = path.join(rootDir, 'server', 'uploads', record.video_filename);
         const assetVideo = path.join(rootDir, 'engine', 'assets', 'videos', record.video_filename);
 
@@ -139,6 +156,40 @@ class HistoryStore {
       console.log(`[ActiveLearning] 오심 케이스 격리 저장 완료: dataset/hard-negatives/${record.id}`);
     } catch (err) {
       console.error('[ActiveLearning] 오심 아카이빙 실패:', err);
+    }
+  }
+
+  /**
+   * 디스크 용량 보호를 위해 보관 한도(MAX_RETAINED_FILES)를 초과한 오래된 업로드/스냅샷 정리
+   */
+  _cleanupOldMediaFiles() {
+    try {
+      const rootDir = path.resolve(__dirname, '../../../');
+      const dirsToClean = [
+        path.join(rootDir, 'server', 'uploads'),
+        path.join(rootDir, 'engine', 'outputs'),
+      ];
+
+      for (const dir of dirsToClean) {
+        if (!fs.existsSync(dir)) continue;
+        const files = fs
+          .readdirSync(dir)
+          .filter((f) => f !== '.gitkeep')
+          .map((name) => {
+            const fullPath = path.join(dir, name);
+            const stat = fs.statSync(fullPath);
+            return { fullPath, mtimeMs: stat.mtimeMs };
+          })
+          .sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+        if (files.length > MAX_RETAINED_FILES) {
+          for (const oldFile of files.slice(MAX_RETAINED_FILES)) {
+            fs.unlinkSync(oldFile.fullPath);
+          }
+        }
+      }
+    } catch (err) {
+      // 파일 정리 중 경미한 오류는 무시
     }
   }
 
